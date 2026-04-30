@@ -792,6 +792,10 @@ class CloudEdgeClient:
         # Start PPCS heartbeat thread
         self._hb_thread = threading.Thread(target=self._heartbeat_loop, daemon=True)
         self._hb_thread.start()
+        # Start stream keepalive thread — re-sends the HTTP session request
+        # every 30 s so the camera doesn't time out its video stream.
+        self._ka_thread = threading.Thread(target=self._stream_keepalive_loop, daemon=True)
+        self._ka_thread.start()
         return True
 
     def reconnect(self) -> bool:
@@ -812,6 +816,40 @@ class CloudEdgeClient:
                 self._ppcs_write(_TYPE_HEARTBEAT)
             except OSError:
                 _log('Heartbeat send failed — connection lost')
+                self.p2p.running = False
+                break
+
+    def _stream_keepalive_loop(self) -> None:
+        """Re-send the HTTP session request every 30 s to keep the camera's
+        video stream active.  Many cameras have a short stream-idle timeout
+        that is separate from the PPCS session heartbeat (0x888E)."""
+        auth_b64 = base64.b64encode(
+            f'admin:{self.password_hash}'.encode()).decode()
+        body = json.dumps({
+            'action': 'GET',
+            'deviceurl': 'http://127.0.0.1/devices/storage'
+        }, separators=(',', ':')).replace('/', '\\/')
+        req = (
+            f'GET /devices/storage HTTP/1.0\r\n'
+            f'Host: 127.0.0.1\r\n'
+            f'User-Agent: Awesome HTTP Client\r\n'
+            f'Content-Type: text/plain, charset=us-ascii\r\n'
+            f'Connection: close\r\n'
+            f'Authorization: Basic {auth_b64}\r\n'
+            f'Content-Length: {len(body)}\r\n\r\n{body}'
+        ).encode()
+
+        while self.p2p.running:
+            time.sleep(30)
+            if not self.p2p.running:
+                break
+            try:
+                self._ppcs_write(_TYPE_HTTP, req)
+                time.sleep(0.3)
+                self.p2p.read_available(0)  # drain camera's response
+                _log('Stream keepalive sent')
+            except OSError:
+                _log('Stream keepalive failed — connection lost')
                 self.p2p.running = False
                 break
 
@@ -881,8 +919,8 @@ class CloudEdgeClient:
         last_ts: Optional[int] = None
         wall_t0: Optional[float] = None
         idle_since: Optional[float] = None
-        _MAX_IDLE = 15.0
-        _MAX_RETRIES = 10
+        _MAX_IDLE = 8.0
+        _MAX_RETRIES = 0  # 0 = unlimited
 
         retries = 0
         while True:
@@ -890,12 +928,12 @@ class CloudEdgeClient:
                 break
 
             if not self.p2p.running:
-                if retries >= _MAX_RETRIES:
+                if _MAX_RETRIES > 0 and retries >= _MAX_RETRIES:
                     _log(f'Giving up after {retries} reconnect attempts')
                     break
                 retries += 1
-                delay = min(2 ** retries, 30)
-                _log(f'Disconnected — retry {retries}/{_MAX_RETRIES} in {delay}s')
+                delay = min(2 ** retries, 10)
+                _log(f'Disconnected — retry {retries} in {delay}s')
                 time.sleep(delay)
                 if self.reconnect():
                     _log('Reconnected')
@@ -1025,6 +1063,25 @@ class CloudEdgeClient:
                 break
             time.sleep(0.1)
 
+    def _port_owner(self, port: int) -> Optional[str]:
+        """Return the process name listening on *port*, or None if undetermined."""
+        try:
+            out = subprocess.check_output(
+                ['lsof', '-nP', f'-iTCP:{port}', '-sTCP:LISTEN'],
+                text=True, stderr=subprocess.DEVNULL
+            ).splitlines()
+            for line in out[1:]:  # skip header
+                parts = line.split()
+                if len(parts) >= 2:
+                    name = subprocess.check_output(
+                        ['ps', '-p', parts[1], '-o', 'comm='],
+                        text=True, stderr=subprocess.DEVNULL
+                    ).strip()
+                    return name or parts[0]
+            return None
+        except Exception:
+            return None
+
     def _ensure_mediamtx(self, rtsp_url: str,
                          mediamtx_config: Optional[str],
                          force_restart: bool = True) -> Optional[subprocess.Popen]:
@@ -1037,6 +1094,11 @@ class CloudEdgeClient:
             self._stop_existing_mediamtx()
 
         if self._port_open(host, port):
+            owner = self._port_owner(port)
+            if owner and 'mediamtx' not in owner.lower():
+                _log(f'WARNING: port {port} is held by "{owner}", not mediamtx — '
+                     f'RTSP publish will fail. Kill that process or use a different port.')
+                return None
             _log(f'mediamtx already listening on {host}:{port}')
             return None
 
@@ -1113,10 +1175,14 @@ class CloudEdgeClient:
         wall_t0: Optional[float] = None
         idle_since: Optional[float] = None
         ffproc: Optional[subprocess.Popen] = None
-        _MAX_IDLE = 15.0
-        _MAX_RETRIES = 50  # more retries for long-running RTSP
+        _MAX_IDLE = 8.0
+        _MAX_RETRIES = 0  # 0 = unlimited
+        ffmpeg_start_t: Optional[float] = None
+        ffmpeg_fail_count = 0
+        ffmpeg_backoff_until = 0.0
 
         def _start_ffmpeg() -> subprocess.Popen:
+            nonlocal ffmpeg_start_t
             cmd = [
                 'ffmpeg', '-hide_banner', '-loglevel', 'warning',
                 '-analyzeduration', '10M', '-probesize', '10M',
@@ -1128,6 +1194,7 @@ class CloudEdgeClient:
                 rtsp_url,
             ]
             _log(f'Starting ffmpeg → {rtsp_url}')
+            ffmpeg_start_t = time.time()
             return subprocess.Popen(cmd, stdin=subprocess.PIPE,
                                     stdout=subprocess.DEVNULL,
                                     stderr=subprocess.DEVNULL)
@@ -1147,16 +1214,35 @@ class CloudEdgeClient:
             ffproc = None
 
         def _write_frame(frame: bytes) -> bool:
-            nonlocal ffproc
+            nonlocal ffproc, ffmpeg_fail_count, ffmpeg_backoff_until
             if not ffproc or ffproc.poll() is not None:
+                if ffproc is not None:
+                    # ffmpeg exited on its own — check how quickly
+                    elapsed = time.time() - (ffmpeg_start_t or 0)
+                    if elapsed < 5.0:
+                        ffmpeg_fail_count += 1
+                        delay = min(2 ** ffmpeg_fail_count, 60)
+                        ffmpeg_backoff_until = time.time() + delay
+                        _log(f'ffmpeg exited after {elapsed:.1f}s '
+                             f'(fail #{ffmpeg_fail_count}) — retry in {delay}s')
+                if time.time() < ffmpeg_backoff_until:
+                    return False  # still backing off, drop frame silently
                 _stop_ffmpeg()
                 ffproc = _start_ffmpeg()
             try:
                 ffproc.stdin.write(frame)
                 ffproc.stdin.flush()
+                if ffmpeg_fail_count > 0:
+                    _log('ffmpeg stable — reset fail count')
+                    ffmpeg_fail_count = 0
                 return True
             except (BrokenPipeError, OSError):
-                _log('ffmpeg pipe broken — will restart')
+                elapsed = time.time() - (ffmpeg_start_t or 0)
+                ffmpeg_fail_count += 1
+                delay = min(2 ** ffmpeg_fail_count, 60)
+                ffmpeg_backoff_until = time.time() + delay
+                _log(f'ffmpeg pipe broken after {elapsed:.1f}s '
+                     f'(fail #{ffmpeg_fail_count}) — retry in {delay}s')
                 _stop_ffmpeg()
                 return False
 
@@ -1167,13 +1253,12 @@ class CloudEdgeClient:
                     break
 
                 if not self.p2p.running:
-                    if retries >= _MAX_RETRIES:
+                    if _MAX_RETRIES > 0 and retries >= _MAX_RETRIES:
                         _log(f'Giving up after {retries} reconnect attempts')
                         break
                     retries += 1
-                    delay = min(2 ** retries, 30)
-                    _log(f'Disconnected — retry {retries}/{_MAX_RETRIES} '
-                         f'in {delay}s')
+                    delay = min(2 ** retries, 10)
+                    _log(f'Disconnected — retry {retries} in {delay}s')
                     time.sleep(delay)
                     if self.reconnect():
                         _log('Reconnected')
@@ -1182,6 +1267,8 @@ class CloudEdgeClient:
                         last_ts = None
                         wall_t0 = None
                         idle_since = None
+                        ffmpeg_fail_count = 0
+                        ffmpeg_backoff_until = 0.0
                         _stop_ffmpeg()  # restart ffmpeg with fresh stream
                     else:
                         _log('Reconnect failed')
