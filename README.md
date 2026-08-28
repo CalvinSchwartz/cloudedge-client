@@ -54,6 +54,9 @@ a key, e.g.:
 EDHNFFBLL...:WeEye2ppStronGer
 ```
 
+For an iPhone-friendly Docker workflow, see [Getting the init string with
+mitmproxy in Docker](docs/get-initstring.md).
+
 ## Usage
 
 ### Docker
