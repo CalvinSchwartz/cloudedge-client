@@ -58,6 +58,18 @@ EDHNFFBLL...:WeEye2ppStronGer
 
 ### Docker
 
+You can provide credentials through environment variables instead of a
+config file:
+
+| Variable | Description |
+| -------- | ----------- |
+| `CLOUDEDGE_DID` | Device ID |
+| `CLOUDEDGE_PASSWORD` | Device password MD5 hash |
+| `CLOUDEDGE_INITSTRING` | PPCS init string |
+| `CLOUDEDGE_DURATION` | Seconds to stream, `0` for indefinite |
+| `CLOUDEDGE_OUTPUT` | Output file path, use `-` for stdout |
+| `CLOUDEDGE_RTSP` | RTSP URL to publish to |
+
 Build the image:
 
 ```bash
@@ -68,12 +80,36 @@ Run it with host networking so UDP discovery and punch-through work correctly:
 
 ```bash
 docker run --rm --network host \
-   -v "$PWD/camera.json:/config/camera.json:ro" \
-   cloudedge-client --config /config/camera.json --duration 60 -o clip.h264
+   -e CLOUDEDGE_DID="$CLOUDEDGE_DID" \
+   -e CLOUDEDGE_PASSWORD="$CLOUDEDGE_PASSWORD" \
+   -e CLOUDEDGE_INITSTRING="$CLOUDEDGE_INITSTRING" \
+   -e CLOUDEDGE_DURATION="60" \
+   -e CLOUDEDGE_OUTPUT="/output/clip.h264" \
+   -v "$PWD/output:/output" \
+   cloudedge-client
 ```
 
 If you want RTSP publishing from inside the container, the image already
-includes `ffmpeg`, so you can pass `--rtsp` the same way.
+includes `ffmpeg`, so you can set `CLOUDEDGE_RTSP` the same way.
+
+Docker Compose example:
+
+```yaml
+services:
+   cloudedge:
+      build: .
+      network_mode: host
+      environment:
+         CLOUDEDGE_DID: ${CLOUDEDGE_DID}
+         CLOUDEDGE_PASSWORD: ${CLOUDEDGE_PASSWORD}
+         CLOUDEDGE_INITSTRING: ${CLOUDEDGE_INITSTRING}
+         CLOUDEDGE_DURATION: ${CLOUDEDGE_DURATION:-60}
+         CLOUDEDGE_OUTPUT: ${CLOUDEDGE_OUTPUT:-/output/clip.h264}
+         CLOUDEDGE_RTSP: ${CLOUDEDGE_RTSP:-}
+      volumes:
+         - ./output:/output
+      command: []
+```
 
 ### Configuration file
 

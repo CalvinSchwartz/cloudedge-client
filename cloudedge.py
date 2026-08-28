@@ -1372,9 +1372,9 @@ def main() -> int:
                     help='Password MD5 hash (32 hex chars)')
     ap.add_argument('--initstring',
                     help='PPCS init string from cloud API')
-    ap.add_argument('--duration', type=int, default=60,
+    ap.add_argument('--duration', type=int,
                     help='Seconds to stream (0 = indefinite)')
-    ap.add_argument('-o', '--output', default='live.h264',
+    ap.add_argument('-o', '--output',
                     help='Output file (use "-" for stdout)')
     ap.add_argument('--rtsp', metavar='URL',
                     help='Publish to RTSP server via ffmpeg '
@@ -1402,9 +1402,24 @@ def main() -> int:
             args.initstring = cfg.get('initstring')
         dispatch_servers = cfg.get('dispatch_servers')
 
+    if not args.did:
+        args.did = os.getenv('CLOUDEDGE_DID')
+    if not args.password:
+        args.password = os.getenv('CLOUDEDGE_PASSWORD')
+    if not args.initstring:
+        args.initstring = os.getenv('CLOUDEDGE_INITSTRING')
+
+    if args.duration is None:
+        args.duration = int(os.getenv('CLOUDEDGE_DURATION', '60'))
+    if not args.output:
+        args.output = os.getenv('CLOUDEDGE_OUTPUT', 'live.h264')
+    if not args.rtsp:
+        args.rtsp = os.getenv('CLOUDEDGE_RTSP')
+
     if not all([args.did, args.password, args.initstring]):
         ap.error('--did, --password, and --initstring are required '
-                 '(via CLI args or --config file)')
+                 '(via CLI args, --config file, or CLOUDEDGE_DID, '
+                 'CLOUDEDGE_PASSWORD, CLOUDEDGE_INITSTRING)')
 
     _log(f'DID: {args.did}')
     dispatchers = dispatch_servers or decode_initstring_servers(args.initstring)

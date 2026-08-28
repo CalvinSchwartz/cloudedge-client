@@ -1,0 +1,14 @@
+services:
+  cloudedge:
+    build: .
+    network_mode: host
+    environment:
+      CLOUDEDGE_DID: ${CLOUDEDGE_DID}
+      CLOUDEDGE_PASSWORD: ${CLOUDEDGE_PASSWORD}
+      CLOUDEDGE_INITSTRING: ${CLOUDEDGE_INITSTRING}
+      CLOUDEDGE_DURATION: ${CLOUDEDGE_DURATION:-60}
+      CLOUDEDGE_OUTPUT: ${CLOUDEDGE_OUTPUT:-/output/clip.h264}
+      CLOUDEDGE_RTSP: ${CLOUDEDGE_RTSP:-}
+    volumes:
+      - ./output:/output
+    command: []
