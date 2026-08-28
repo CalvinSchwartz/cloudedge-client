@@ -1,5 +1,7 @@
 # CloudEdge Camera Client
 
+[![Publish Docker image](https://github.com/CalvinSchwartz/cloudedge-client/actions/workflows/publish-docker.yml/badge.svg)](https://github.com/CalvinSchwartz/cloudedge-client/actions/workflows/publish-docker.yml)
+
 A pure-Python P2P client for CloudEdge / Meari / Arenti IP cameras.  
 No native libraries, no Android emulation — runs on any platform with Python 3.8+.
 
@@ -53,6 +55,25 @@ EDHNFFBLL...:WeEye2ppStronGer
 ```
 
 ## Usage
+
+### Docker
+
+Build the image:
+
+```bash
+docker build -t cloudedge-client .
+```
+
+Run it with host networking so UDP discovery and punch-through work correctly:
+
+```bash
+docker run --rm --network host \
+   -v "$PWD/camera.json:/config/camera.json:ro" \
+   cloudedge-client --config /config/camera.json --duration 60 -o clip.h264
+```
+
+If you want RTSP publishing from inside the container, the image already
+includes `ffmpeg`, so you can pass `--rtsp` the same way.
 
 ### Configuration file
 
